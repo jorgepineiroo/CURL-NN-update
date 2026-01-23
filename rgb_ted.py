@@ -82,7 +82,7 @@ class TED(nn.Module):
             layer(64, 64, 3, 2, 1),
             nn.AdaptiveAvgPool2d(1),
             Flatten(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.2),
             nn.Linear(64, 64),
 
         )

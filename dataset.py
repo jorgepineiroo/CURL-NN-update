@@ -67,32 +67,29 @@ def load_adobe_5k_data(img_ids_filepath, data_dirpath):
 
 
 class CustomDataset(Dataset):
-    def __init__(self, data_dir, target_size, random_resize=False, random_crop=False, test_plot=False):
+    def __init__(self, data_dir, target_size, split='train', random_resize=False, random_crop=False, test_plot=False):
         """
         Initialize the dataset.
         
-        :param data_dir: Path to the dataset folder (e.g., 'curl_custom_dataset/train' or just 'curl_custom_dataset')
-                         The folder should contain: input/, output/, and a .txt file with image IDs
+        :param data_dir: Path to the dataset folder containing input/, output/, and images_*.txt files
         :param target_size: Tuple (width, height) for cropping
+        :param split: Which split to use - 'train', 'valid', or 'test'
         :param random_resize: Whether to apply random resizing
         :param random_crop: Whether to apply random cropping
         :param test_plot: Whether this is for testing/visualization
         """
-        # Determine the correct paths based on data_dir structure
-        # Option 1: data_dir points to a folder with input/, output/, and images_*.txt
-        # Option 2: data_dir is the parent folder, and we need to find the right .txt file
+        # Map split names to txt filenames
+        split_to_filename = {
+            'train': 'images_train.txt',
+            'valid': 'images_valid.txt',
+            'validation': 'images_valid.txt',
+            'test': 'images_test.txt'
+        }
         
-        parent_dir = data_dir
+        if split not in split_to_filename:
+            raise ValueError(f"Invalid split '{split}'. Must be one of: {list(split_to_filename.keys())}")
         
-        # Try to find the appropriate .txt file based on folder name
-        if 'train' in data_dir.lower():
-            txt_filename = 'images_train.txt'
-        elif 'valid' in data_dir.lower():
-            txt_filename = 'images_valid.txt'
-        elif 'test' in data_dir.lower():
-            txt_filename = 'images_test.txt'
-        else:
-            txt_filename = 'images_train.txt'  # Default
+        txt_filename = split_to_filename[split]
         
         # Check if .txt file is in data_dir or parent directory
         img_ids_filepath = os.path.join(data_dir, txt_filename)

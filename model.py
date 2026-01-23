@@ -17,239 +17,157 @@ import torch
 import torch.nn as nn
 import rgb_ted
 from utils import ImageProcessing
-from torch.autograd import Variable
 import math
-from math import exp
 import torch.nn.functional as F
-from torchmetrics.functional import multiscale_structural_similarity_index_measure
 
 matplotlib.use('agg')
 np.set_printoptions(threshold=sys.maxsize)
 
 
 class NEW_CURLLoss(nn.Module):
+    """
+    Simplified CURL Loss function following the paper structure:
+    Total Loss = L_lab + L_hsv + L_rgb + L_reg
+    
+    Where:
+    - L_lab: L1 loss in CIELab color space
+    - L_hsv: HSV loss in conical space (handles angular nature of Hue)
+    - L_rgb: L1 loss + Cosine similarity loss in RGB space
+    - L_reg: Curve regularization loss (gradient smoothness)
+    """
 
-    def __init__(self, device, ssim_window_size=5, alpha=0.5):
-
-        """Initialisation of the DeepLPF loss function
-        :param ssim_window_size: size of averaging window for SSIM
-        :param alpha: interpolation paramater for L1 and SSIM parts of the loss
-        :returns: N/A
-        :rtype: N/A
+    def __init__(self, device, w_lab=1.0, w_hsv=1.0, w_rgb=1.0, w_cosine=1.0, w_reg=1e-6):
         """
-
+        Initialisation of the CURL loss function.
+        
+        :param device: torch device (cuda/cpu)
+        :param w_lab: weight for LAB loss term
+        :param w_hsv: weight for HSV loss term  
+        :param w_rgb: weight for RGB L1 loss term
+        :param w_cosine: weight for cosine similarity loss within RGB term
+        :param w_reg: weight for curve regularization term
+        """
         super(NEW_CURLLoss, self).__init__()
-        self.alpha = alpha
-        self.ssim_window_size = ssim_window_size
         self.device = device
+        self.w_lab = w_lab
+        self.w_hsv = w_hsv
+        self.w_rgb = w_rgb
+        self.w_cosine = w_cosine
+        self.w_reg = w_reg
 
-    def create_window(self, window_size, num_channel):
-        """Window creation function for SSIM metric. Gaussian weights are applied to the window.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param window_size: size of the window to compute statistics
-        :param num_channel: number of channels
-        :returns: Tensor of shape Cx1xWindow_sizexWindow_size
-        :rtype: Tensor
+    def compute_hsv_loss(self, predicted_img_batch, target_img_batch):
         """
-
-        _1D_window = self.gaussian(window_size, 1.5).unsqueeze(1)
-        _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-        window = Variable(_2D_window.expand(num_channel, 1, window_size, window_size).contiguous())
-
-        return window
-
-    def gaussian(self, window_size, sigma):
+        Compute HSV loss in conical space to handle the angular nature of Hue.
+        
+        L_hsv = mean(|s_p * v_p * cos(h_p) - s_r * v_r * cos(h_r)| + 
+                     |s_p * v_p * sin(h_p) - s_r * v_r * sin(h_r)|)
+        
+        :param predicted_img_batch: predicted RGB images (BxCxHxW)
+        :param target_img_batch: target RGB images (BxCxHxW)
+        :returns: HSV loss value
         """
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-        :param window_size: size of the SSIM sampling window e.g. 11
-        :param sigma: Gaussian variance
-        :returns: 1xWindow_size Tensor of Gaussian weights
-        :rtype: Tensor
+        # Convert RGB to HSV
+        predicted_hsv = ImageProcessing.rgb_to_hsv_new(predicted_img_batch, device=self.device)
+        target_hsv = ImageProcessing.rgb_to_hsv_new(target_img_batch, device=self.device)
+        
+        # Extract H, S, V channels - H is normalized to [0,1], convert to radians [0, 2π]
+        pred_hue = predicted_hsv[:, 0, :, :] * 2 * math.pi
+        pred_sat = predicted_hsv[:, 1, :, :]
+        pred_val = predicted_hsv[:, 2, :, :]
+        
+        target_hue = target_hsv[:, 0, :, :] * 2 * math.pi
+        target_sat = target_hsv[:, 1, :, :]
+        target_val = target_hsv[:, 2, :, :]
+        
+        # Conical space representation
+        pred_x = pred_sat * pred_val * torch.cos(pred_hue)
+        pred_y = pred_sat * pred_val * torch.sin(pred_hue)
+        
+        target_x = target_sat * target_val * torch.cos(target_hue)
+        target_y = target_sat * target_val * torch.sin(target_hue)
+        
+        # L1 loss on conical coordinates
+        term1 = torch.abs(pred_x - target_x)
+        term2 = torch.abs(pred_y - target_y)
+        
+        return torch.mean(term1 + term2)
+
+    def compute_lab_loss(self, predicted_img_batch, target_img_batch):
         """
-        gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
-        return gauss / gauss.sum()
-
-    def compute_ssim(self, img1, img2):
-        """Computes the structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
+        Compute L1 loss in CIELab color space.
+        
+        :param predicted_img_batch: predicted RGB images (BxCxHxW)
+        :param target_img_batch: target RGB images (BxCxHxW)
+        :returns: LAB L1 loss value
         """
-        (_, num_channel, _, _) = img1.size()
-        window = self.create_window(self.ssim_window_size, num_channel)
+        predicted_lab = torch.clamp(
+            ImageProcessing.rgb_to_lab(predicted_img_batch, device=self.device), 0, 1
+        )
+        target_lab = torch.clamp(
+            ImageProcessing.rgb_to_lab(target_img_batch, device=self.device), 0, 1
+        )
+        
+        return F.l1_loss(predicted_lab, target_lab)
 
-        if img1.is_cuda:
-            window = window.cuda(img1.get_device())
-            window = window.type_as(img1)
-
-        mu1 = F.conv2d(
-            img1, window, padding=self.ssim_window_size // 2, groups=num_channel)
-        mu2 = F.conv2d(
-            img2, window, padding=self.ssim_window_size // 2, groups=num_channel)
-
-        mu1_sq = mu1.pow(2)
-        mu2_sq = mu2.pow(2)
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = F.conv2d(
-            img1 * img1, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_sq
-        sigma2_sq = F.conv2d(
-            img2 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu2_sq
-        sigma12 = F.conv2d(
-            img1 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_mu2
-
-        C1 = 0.01 ** 2
-        C2 = 0.03 ** 2
-
-        ssim_map1 = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2))
-        ssim_map2 = ((mu1_sq.to(self.device) + mu2_sq.to(self.device) + C1) *
-                     (sigma1_sq.to(self.device) + sigma2_sq.to(self.device) + C2))
-        ssim_map = ssim_map1.to(self.device) / ssim_map2.to(self.device)
-        v1 = 2.0 * sigma12.to(self.device) + C2
-        v2 = sigma1_sq.to(self.device) + sigma2_sq.to(self.device) + C2
-        cs = torch.mean(v1 / v2)
-
-        return ssim_map.mean(), cs
-
-    def compute_msssim(self, img1, img2):
-        """Computes the multi scale structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
+    def compute_rgb_loss(self, predicted_img_batch, target_img_batch):
         """
-        if img1.shape[2] != img2.shape[2]:
-            img1 = img1.transpose(2, 3)
+        Compute RGB loss: L1 pixel-wise loss + Cosine similarity loss.
+        
+        L_rgb = L1(pred, target) + w_cosine * (1 - cosine_similarity(pred, target))
+        
+        :param predicted_img_batch: predicted RGB images (BxCxHxW)
+        :param target_img_batch: target RGB images (BxCxHxW)
+        :returns: RGB loss value (L1 + cosine)
+        """
+        # L1 pixel-wise loss
+        l1_loss = F.l1_loss(predicted_img_batch, target_img_batch)
+        
+        # Cosine similarity loss between RGB pixel vectors
+        # cosine_similarity computes along dim=1 (channel dimension)
+        cosine_sim = F.cosine_similarity(predicted_img_batch, target_img_batch, dim=1)
+        cosine_loss = 1.0 - torch.mean(cosine_sim)
+        
+        return l1_loss + self.w_cosine * cosine_loss
 
-        if img1.shape != img2.shape:
-            raise RuntimeError('Input images must have the same shape (%s vs. %s).',
-                               img1.shape, img2.shape)
-        if img1.ndim != 4:
-            raise RuntimeError('Input images must have four dimensions, not %d',
-                               img1.ndim)
-
-        device = img1.device
-        weights = torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333]).to(device)
-        levels = weights.size()[0]
-        ssims = []
-        mcs = []
-        for _ in range(levels):
-            ssim, cs = self.compute_ssim(img1, img2)
-
-            # Relu normalize (not compliant with original definition)
-            ssims.append(ssim)
-            mcs.append(cs)
-
-            img1 = F.avg_pool2d(img1, (2, 2))
-            img2 = F.avg_pool2d(img2, (2, 2))
-
-        ssims = torch.stack(ssims)
-        mcs = torch.stack(mcs)
-
-        # Simple normalize (not compliant with original definition)
-        # TODO: remove support for normalize == True (kept for backward support)
-        ssims = (ssims + 1) / 2
-        mcs = (mcs + 1) / 2
-
-        # Clamp to avoid NaN when raising to power
-        ssims = torch.clamp(ssims, min=1e-10)
-        mcs = torch.clamp(mcs, min=1e-10)
-
-        pow1 = mcs ** weights
-        pow2 = ssims ** weights
-
-        output = torch.prod(pow1[:-1] * pow2[-1])
-        return output
-
-    def compute_msssim_new(self, img1, img2):
-        return multiscale_structural_similarity_index_measure(img1.to(self.device), img2.to(self.device),
-                                                              kernel_size=11, normalize='relu',
-                                                              gaussian_kernel=False)
+    def compute_reg_loss(self, gradient_regulariser):
+        """
+        Compute curve regularization loss.
+        Penalizes non-smooth curves by measuring gradient variations.
+        
+        :param gradient_regulariser: regularization tensor from curve layers
+        :returns: regularization loss value
+        """
+        if not torch.is_tensor(gradient_regulariser):
+            return torch.tensor(0.0, device=self.device)
+        
+        return torch.mean(gradient_regulariser)
 
     def forward(self, predicted_img_batch, target_img_batch, gradient_regulariser):
-        """Forward function for the CURL loss
-
-        :param predicted_img_batch_high_res:
-        :param predicted_img_batch_high_res_rgb:
-        :param target_img_batch: Tensor of shape BxCxWxH
-        :returns: value of loss function
-        :rtype: float
-
         """
-        num_images = target_img_batch.shape[0]
-        target_img_batch = target_img_batch
-
-        ssim_loss_value = torch.zeros(1, 1).to(self.device)
-        l1_loss_value = torch.zeros(1, 1).to(self.device)
-        cosine_rgb_loss_value = torch.zeros(1, 1).to(self.device)
-        hsv_loss_value = torch.zeros(1, 1).to(self.device)
-        rgb_loss_value = torch.zeros(1, 1).to(self.device)
-
-        predicted_img_lab = torch.clamp(ImageProcessing.rgb_to_lab(predicted_img_batch, device=self.device), 0, 1)
-        target_img_lab = torch.clamp(ImageProcessing.rgb_to_lab(target_img_batch, device=self.device), 0, 1)
-
-        # target_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(target_img_batch, device=self.device), 0, 1)
-        # predicted_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(predicted_img_batch, device=self.device), 0, 1)
-        target_img_hsv = ImageProcessing.rgb_to_hsv_new(target_img_batch, device=self.device)
-        predicted_img_hsv = ImageProcessing.rgb_to_hsv_new(predicted_img_batch, device=self.device)
-
-        predicted_img_hue = (predicted_img_hsv[:, 0, :, :] * 2 * math.pi)
-        predicted_img_val = predicted_img_hsv[:, 2, :, :]
-        predicted_img_sat = predicted_img_hsv[:, 1, :, :]
-        target_img_hue = (target_img_hsv[:, 0, :, :] * 2 * math.pi)
-        target_img_val = target_img_hsv[:, 2, :, :]
-        target_img_sat = target_img_hsv[:, 1, :, :]
-
-        target_img_L_ssim = target_img_lab[:, 0:1, :, :]
-        predicted_img_L_ssim = predicted_img_lab[:, 0:1, :, :]
-
-        ssim_value = self.compute_msssim(predicted_img_L_ssim, target_img_L_ssim)
-        # ssim_value = self.compute_msssim_new(predicted_img_L_ssim, target_img_L_ssim)
-
-        ssim_loss_value += (1.0 - ssim_value)
-
-        predicted_img_1 = predicted_img_val * predicted_img_sat * torch.cos(predicted_img_hue)
-        predicted_img_2 = predicted_img_val * predicted_img_sat * torch.sin(predicted_img_hue)
-
-        target_img_1 = target_img_val * target_img_sat * torch.cos(target_img_hue)
-        target_img_2 = target_img_val * target_img_sat * torch.sin(target_img_hue)
-
-        predicted_img_hsv = torch.stack((predicted_img_1, predicted_img_2, predicted_img_val), 3)
-        target_img_hsv = torch.stack((target_img_1, target_img_2, target_img_val), 3)
-
-        l1_loss_value += F.l1_loss(predicted_img_lab, target_img_lab)
-        rgb_loss_value += F.l1_loss(predicted_img_batch, target_img_batch)
-        hsv_loss_value += F.l1_loss(predicted_img_hsv, target_img_hsv)
-
-        cosine_rgb_loss_value += (1 - torch.mean(
-            torch.nn.functional.cosine_similarity(predicted_img_batch, target_img_batch, dim=1)))
-
-        l1_loss_value = l1_loss_value / num_images
-        rgb_loss_value = rgb_loss_value / num_images
-        ssim_loss_value = ssim_loss_value / num_images
-        cosine_rgb_loss_value = cosine_rgb_loss_value / num_images
-        hsv_loss_value = hsv_loss_value / num_images
-
-        # curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-        #              hsv_loss_value + 10*ssim_loss_value + torch.mean(1e-6*gradient_regulariser))/6
-
-        if not torch.is_tensor(gradient_regulariser):
-            curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-                         hsv_loss_value + 10 * ssim_loss_value) / 6
-            return curl_loss
-        else:
-            curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-                         hsv_loss_value + 10 * ssim_loss_value + torch.mean(1e-6 * gradient_regulariser)) / 6
-            # return rgb_loss_value,cosine_rgb_loss_value,l1_loss_value,hsv_loss_value,10*ssim_loss_value, torch.mean(1e-6*gradient_regulariser)
-
-        return curl_loss
+        Forward function for the CURL loss.
+        
+        Total Loss = w_lab * L_lab + w_hsv * L_hsv + w_rgb * L_rgb + w_reg * L_reg
+        
+        :param predicted_img_batch: predicted images (BxCxHxW)
+        :param target_img_batch: ground truth images (BxCxHxW)
+        :param gradient_regulariser: curve regularization tensor
+        :returns: total loss value
+        """
+        # Compute individual loss terms
+        l_lab = self.compute_lab_loss(predicted_img_batch, target_img_batch)
+        l_hsv = self.compute_hsv_loss(predicted_img_batch, target_img_batch)
+        l_rgb = self.compute_rgb_loss(predicted_img_batch, target_img_batch)
+        l_reg = self.compute_reg_loss(gradient_regulariser)
+        
+        # Weighted sum of all losses
+        total_loss = (
+            self.w_lab * l_lab + 
+            self.w_hsv * l_hsv + 
+            self.w_rgb * l_rgb + 
+            self.w_reg * l_reg
+        )
+        
+        return total_loss
 
 
 class NEW_CURLLayer(nn.Module):
@@ -288,9 +206,9 @@ class NEW_CURLLayer(nn.Module):
 
         self.fc_lab = torch.nn.Linear(64, 48)
 
-        self.dropout1 = nn.Dropout(0.5)
-        self.dropout2 = nn.Dropout(0.5)
-        self.dropout3 = nn.Dropout(0.5)
+        self.dropout1 = nn.Dropout(0.2)
+        self.dropout2 = nn.Dropout(0.2)
+        self.dropout3 = nn.Dropout(0.2)
 
         self.rgb_layer1 = ConvBlock(64, 64)
         self.rgb_layer2 = MaxPoolBlock()
