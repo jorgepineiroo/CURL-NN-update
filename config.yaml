@@ -1,44 +1,43 @@
 pretrained_weights: False
-#pretrained_weights: False
 num_workers: 8
 fix_seed: False
-result_path: ./results/
+result_path: ./results
 
 train_settings:
-  train_path: ../curl_custom_dataset_V3
-  train_batch_size: 8
-  num_epochs: 500
+  train_path: ../curl_custom_dataset_V8
+  train_batch_size: 1
+  num_epochs: 400
   shuffle: True
-  h_input: null
-  w_input: null
+  h_input: 512
+  w_input: 512
   random_resize: False
   random_crop: False
   mixed_precision: True
 
 valid_settings:
-  valid_path: ../curl_custom_dataset_V3
-  valid_batch_size: 8
+  valid_path: ../curl_custom_dataset_V8
+  valid_batch_size: 1
   do_every: 5
   device: cuda
   plot: False
   log: True
 
 test_settings:
-  test_path: ../curl_custom_dataset_V3
-  test_batch_size: 8
-  do_every: 10
+  test_path: ../curl_custom_dataset_V8
+  test_batch_size: 1
+  do_every: 5
   device: cuda
   plot: True
   log: True
 
 optimizer:
   name: AdamW
-  lr: 1e-4
+  lr: 8e-5
   weight_decouple: True
-  weight_decay: 0.001
+  weight_decay: 0.005
   eps: 1e-8
   grad_clip_norm: 1.0
   decay:
-    warmup: 10
-    min_lr: 1e-6
+    warmup: 3
+    min_lr: 6e-6
     gamma: 1.0

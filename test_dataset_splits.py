@@ -8,7 +8,7 @@ from dataset import CustomDataset
 # Load all three splits
 print("Loading datasets...")
 train_dataset = CustomDataset(
-    data_dir='../curl_custom_dataset_V3',
+    data_dir='../curl_custom_dataset_V4',
     target_size=(None, None),
     split='train',
     random_resize=False,
@@ -16,7 +16,7 @@ train_dataset = CustomDataset(
 )
 
 valid_dataset = CustomDataset(
-    data_dir='../curl_custom_dataset_V3',
+    data_dir='../curl_custom_dataset_V4',
     target_size=(None, None),
     split='valid',
     random_resize=False,
@@ -24,7 +24,7 @@ valid_dataset = CustomDataset(
 )
 
 test_dataset = CustomDataset(
-    data_dir='../curl_custom_dataset_V3',
+    data_dir='../curl_custom_dataset_V4',
     target_size=(None, None),
     split='test',
     random_resize=False,
