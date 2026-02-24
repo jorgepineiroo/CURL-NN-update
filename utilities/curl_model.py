@@ -102,9 +102,6 @@ class CURLLayer(nn.Module):
         feat = x[:, 3:64, :, :]
         img = original_img  # Use original image for curve application, not TED features
 
-        torch.cuda.empty_cache()
-        shape = x.shape
-
         img_clamped = torch.clamp(img, 0, 1)
 
         img_lab = torch.clamp(ImageProcessing.rgb_to_lab(img_clamped, device=device), 0, 1)
