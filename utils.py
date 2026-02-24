@@ -862,7 +862,7 @@ class ImageProcessing(object):
 
         r = r.to(device)
         s = s.to(device)
-        r = r - s
+        r = torch.clamp(r - s, 0, 1)
 
         sl = slope[:, :-1, None, None].repeat(1, 1, img.shape[1], img.shape[2]).to(device)
         scl = torch.mul(sl, r)

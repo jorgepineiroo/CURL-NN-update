@@ -108,14 +108,14 @@ def main(config):
     train_writer = SummaryWriter(os.path.join(save_path, 'train', 'tensorboard_logs'))
 
     # preparing dataset and dataloader
-    training_dataset = CustomDataset(data_dir=train_path, target_size=target_size,
+    training_dataset = CustomDataset(data_dir=train_path, target_size=target_size, split='train',
                                      random_resize=random_resize, random_crop=random_crop)
-    validation_dataset = CustomDataset(data_dir=valid_path, target_size=target_size,
+    validation_dataset = CustomDataset(data_dir=valid_path, target_size=target_size, split='valid',
                                        random_resize=False, random_crop=False)
-    test_dataset = CustomDataset(data_dir=test_path, target_size=target_size,
+    test_dataset = CustomDataset(data_dir=test_path, target_size=target_size, split='test',
                                  random_resize=False, random_crop=False)
 
-    training_dataloader = DataLoader(training_dataset, batch_size=train_batch_size, shuffle=False,
+    training_dataloader = DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True,
                                      num_workers=n_workers)
     valid_dataloader = DataLoader(validation_dataset, batch_size=valid_batch_size, shuffle=False, num_workers=n_workers)
     test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, num_workers=n_workers)
@@ -127,7 +127,15 @@ def main(config):
                                         device=test_device, log=test_log, plot=test_plot)
 
     net = prepare_model(device, pretrained_weights, print_model=False)
-    loss_fn = model.NEW_CURLLoss(ssim_window_size=5, device=device)
+    # Simplified CURL loss: L_total = w_lab*L_lab + w_hsv*L_hsv + w_rgb*L_rgb + w_reg*L_reg
+    loss_fn = model.NEW_CURLLoss(
+        device=device,
+        w_lab=1.0,      # Weight for LAB L1 loss
+        w_hsv=1.0,      # Weight for HSV conical loss
+        w_rgb=1.0,      # Weight for RGB L1 loss
+        w_cosine=0.5,   # Weight for cosine similarity within RGB term
+        w_reg=1e-6      # Weight for curve regularization
+    )
     optimizer, lr_scheduler = prepare_optimizer(name=opt_name, net=net, lr=learning_rate, min_lr=min_lr,
                                                 train_samples=training_dataset.num_samples, batch=train_batch_size,
                                                 epochs=num_epoch, warmup=warmup, gamma=gamma, wd=weight_decay,
@@ -135,6 +143,10 @@ def main(config):
     scaler = torch.amp.GradScaler('cuda',enabled=mixed_precision)
 
     num_batches = int(np.ceil(training_dataset.num_samples / train_batch_size))
+
+    # Track best test metrics for checkpoint saving
+    best_test_psnr = 0.0
+    best_test_ssim = 0.0
 
     logging.info(f'fix seed: {fix_seed}')
     logging.info(f'device: {device}')
@@ -198,17 +210,6 @@ def main(config):
             logging.info(
                 f'validation set: {int(end - start)}s - valid_psnr: %.3f valid_ssim: %.3f' % (valid_psnr, valid_ssim))
 
-            snapshot_path = os.path.join(checkpoints_path,
-                                         f'val-psnr_{valid_psnr}-ssim_{valid_ssim}-epoch_{epoch + 1}-model.pt')
-
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': net.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': 0,
-            }, snapshot_path)
-            logging.info(f'saving a checkpoint with name of {snapshot_path}')
-
         # test set
         if (epoch + 1) % int(test_every) == 0 and (test_evaluator.log or test_evaluator.plot):
             logging.info("evaluating the model on the test set")
@@ -218,6 +219,39 @@ def main(config):
             end = time.time()
 
             logging.info(f'test set: {int(end - start)}s - test_psnr: %.3f test_ssim: %.3f' % (test_psnr, test_ssim))
+
+            # Save checkpoint if either PSNR or SSIM improved
+            psnr_improved = test_psnr > best_test_psnr
+            ssim_improved = test_ssim > best_test_ssim
+            
+            if psnr_improved or ssim_improved:
+                # Update best metrics
+                if psnr_improved:
+                    best_test_psnr = test_psnr
+                if ssim_improved:
+                    best_test_ssim = test_ssim
+                
+                # Create descriptive filename
+                snapshot_path = os.path.join(checkpoints_path,
+                                             f'best-test-psnr_{test_psnr:.3f}-ssim_{test_ssim:.3f}-epoch_{epoch + 1}-model.pt')
+
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': net.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_test_psnr': best_test_psnr,
+                    'best_test_ssim': best_test_ssim,
+                }, snapshot_path)
+                
+                # Log which metric(s) improved
+                improvements = []
+                if psnr_improved:
+                    improvements.append(f'PSNR: {test_psnr:.3f}')
+                if ssim_improved:
+                    improvements.append(f'SSIM: {test_ssim:.3f}')
+                logging.info(f'New best {" and ".join(improvements)}! Saving checkpoint: {snapshot_path}')
+            else:
+                logging.info(f'No improvement - PSNR: {test_psnr:.3f} (best: {best_test_psnr:.3f}), SSIM: {test_ssim:.3f} (best: {best_test_ssim:.3f}). Not saving checkpoint.')
 
 
 if __name__ == "__main__":

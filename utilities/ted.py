@@ -9,6 +9,7 @@ Tested with Pytorch 1.7.1, Python 3.7.9
 
 Authors: Sean Moran (sean.j.moran@gmail.com), 2020
 
+Adapted for inference from training model architecture.
 '''
 import torch
 import torch.nn as nn
